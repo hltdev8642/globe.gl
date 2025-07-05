@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Live Flights Globe Demo</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { background: #111; color: #fff; }
+    #globeViz { width: 100vw; height: 100vh; }
+    #info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0,0,0,0.7);
+      padding: 10px;
+      border-radius: 6px;
+      z-index: 10;
+      font-family: sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div id="info">
+    <h2>Live Flights Globe</h2>
+    <p>Flight data from <a href="https://adsb.lol/" target="_blank" style="color: #0af;">adsb.lol</a></p>
+    <div id="legend" style="margin-top:10px;font-size:0.95em;"></div>
+    <div id="last-updated" style="margin-top:5px;font-size:0.9em;color:#aaa;"></div>
+  </div>
+  <div id="globeViz"></div>
+  <div id="popup" style="display:none;position:absolute;z-index:20;min-width:220px;background:rgba(0,0,0,0.92);color:#fff;padding:12px 16px;border-radius:8px;box-shadow:0 2px 12px #000;font-family:sans-serif;"></div>
+  <!-- <script src="/dist/globe.gl.js"></script> -->
+  <!-- <script src="../../dist/globe.gl.js"></script> -->
+  <script src="//cdn.jsdelivr.net/npm/globe.gl"></script>
+
+  <script>
+    let flightsRaw = [];
+    let markers = [];
+    const globe = Globe()(document.getElementById('globeViz'))
+      .globeImageUrl('//unpkg.com/three-globe/example/img/earth-dark.jpg')
+      .backgroundColor('#111')
+      .onArcClick(showFlightPopup);
+
+    // Airplane marker geometry (simple triangle)
+    function createAirplaneMarker(lat, lng, alt, color) {
+      const marker = document.createElement('div');
+      marker.style.width = '0';
+      marker.style.height = '0';
+      marker.style.borderLeft = '8px solid transparent';
+      marker.style.borderRight = '8px solid transparent';
+      marker.style.borderBottom = `16px solid ${color}`;
+      marker.style.position = 'absolute';
+      marker.style.pointerEvents = 'none';
+      marker.style.zIndex = 15;
+      marker.dataset.lat = lat;
+      marker.dataset.lng = lng;
+      marker.dataset.alt = alt;
+      return marker;
+    }
+
+
+    // Get user's location or fallback to a default (London)
+    function getUserLocation() {
+      return new Promise(resolve => {
+        if (navigator.geolocation) {
+          navigator.geolocation.getCurrentPosition(
+            pos => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+            () => resolve({ lat: 51.5, lon: 0 })
+          );
+        } else {
+          resolve({ lat: 51.5, lon: 0 });
+        }
+      });
+    }
+
+    async function fetchNearbyAircraft(lat, lon, radius = 250) {
+      const url = `https://api.adsb.lol/v2/point/${lat}/${lon}/${radius}`;
+      const res = await fetch(url);
+      if (!res.ok) return [];
+      const data = await res.json();
+      if (!data.ac || !Array.isArray(data.ac)) return [];
+      return data.ac;
+    }
+
+    function aircraftToArcs(aircraft, center) {
+      // Show aircraft as arcs from center to their position
+      return aircraft.filter(ac => ac.lat && ac.lon)
+        .map(ac => ({
+          startLat: center.lat,
+          startLng: center.lon,
+          endLat: ac.lat,
+          endLng: ac.lon,
+          color: 'rgba(0,255,255,0.7)',
+          callsign: ac.flight || ac.hex || '',
+          alt: ac.alt_baro || ac.alt_geom || 0,
+          icao: ac.hex || '',
+          reg: ac.r || '',
+          from: ac.from_iata || '',
+          to: ac.to_iata || '',
+          airline: ac.op || ac.c || '',
+          speed: ac.gs || 0,
+          squawk: ac.squawk || '',
+          flight: ac.flight || '',
+          tlat: ac.lat,
+          tlon: ac.lon
+        }));
+    }
+
+    function showFlightPopup(arc, event) {
+      const popup = document.getElementById('popup');
+      popup.innerHTML = `<b>Callsign:</b> ${arc.callsign || arc.flight || 'N/A'}<br>
+        <b>Airline:</b> ${arc.airline || 'N/A'}<br>
+        <b>From:</b> ${arc.from || 'N/A'}<br>
+        <b>To:</b> ${arc.to || 'N/A'}<br>
+        <b>Altitude:</b> ${arc.alt} ft<br>
+        <b>Speed:</b> ${arc.speed} kt<br>
+        <b>Reg:</b> ${arc.reg || 'N/A'}<br>
+        <b>ICAO:</b> ${arc.icao || 'N/A'}<br>
+        <b>Squawk:</b> ${arc.squawk || 'N/A'}`;
+      popup.style.display = 'block';
+      popup.style.left = (event.clientX + 20) + 'px';
+      popup.style.top = (event.clientY - 20) + 'px';
+    }
+
+    document.addEventListener('click', function(e) {
+      if (!e.target.closest('.globe-arcs') && !e.target.closest('#popup')) {
+        document.getElementById('popup').style.display = 'none';
+      }
+    });
+
+    function updateLegend(count) {
+      document.getElementById('legend').innerHTML = `<b>Flights shown:</b> ${count}`;
+    }
+
+    function updateLastUpdated() {
+      const now = new Date();
+      document.getElementById('last-updated').textContent = `Last updated: ${now.toLocaleTimeString()}`;
+    }
+
+    function updateAirplaneMarkers(arcs) {
+      // Remove old markers
+      markers.forEach(m => m.remove());
+      markers = [];
+      // Add new airplane markers at start positions
+      arcs.forEach(arc => {
+        const marker = createAirplaneMarker(arc.startLat, arc.startLng, arc.alt, '#0ff');
+        document.body.appendChild(marker);
+        markers.push(marker);
+      });
+      // Animate markers along arcs
+      let t = 0;
+      function animate() {
+        t = (t + 0.01) % 1;
+        markers.forEach((marker, i) => {
+          const arc = arcs[i];
+          // Simple linear interpolation for demo
+          const lat = arc.startLat + (arc.endLat - arc.startLat) * t;
+          const lng = arc.startLng + (arc.endLng - arc.startLng) * t;
+          // Project to screen (approximate, not true 3D)
+          const coords = globe.getScreenCoords(lat, lng, 0.2 + 0.3 * (arc.alt/40000));
+          if (coords) {
+            marker.style.left = coords.x + 'px';
+            marker.style.top = coords.y + 'px';
+            marker.style.display = 'block';
+          } else {
+            marker.style.display = 'none';
+          }
+        });
+        requestAnimationFrame(animate);
+      }
+      animate();
+    }
+
+
+    let userCenter = { lat: 51.5, lon: 0 };
+    async function updateFlights() {
+      // Get user location once
+      if (!userCenter) userCenter = { lat: 51.5, lon: 0 };
+      const aircraft = await fetchNearbyAircraft(userCenter.lat, userCenter.lon);
+      flightsRaw = aircraft;
+      const arcs = aircraftToArcs(aircraft, userCenter);
+      globe.arcsData(arcs)
+        .arcColor('color')
+        .arcAltitude(f => 0.1 + 0.3 * (f.alt/40000))
+        .arcLabel(f => `${f.callsign}<br>Alt: ${f.alt} ft`)
+        .arcStroke(0.7)
+        .arcDashLength(0.4)
+        .arcDashGap(0.2)
+        .arcDashAnimateTime(4000);
+      updateLegend(arcs.length);
+      updateLastUpdated();
+      updateAirplaneMarkers(arcs);
+    }
+
+    // On load, get user location and start updates
+    getUserLocation().then(center => {
+      userCenter = center;
+      globe.pointOfView({ lat: center.lat, lng: center.lon, altitude: 2 }, 1000);
+      updateFlights();
+      setInterval(updateFlights, 30000); // Refresh every 30s
+    });
+
+    updateFlights();
+    setInterval(updateFlights, 30000); // Refresh every 30s
+  </script>
+</body>
+</html>
